@@ -11,12 +11,14 @@ from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from random import choice, randint
 from string import ascii_letters
-from threading import Thread
+from threading import Thread,Lock, Semaphore
 
 import requests
 
 requests.packages.urllib3.disable_warnings()
 
+lock = Lock()
+semaphore = None
 
 CREDS = ('admin:admin',
          'author:author',
@@ -1586,6 +1588,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='AEM hacker by @0ang3el, see the slides - https://speakerdeck.com/0ang3el/hunting-for-security-bugs-in-aem-webapps')
 
     parser.add_argument('-u', '--url', help='url to scan')
+    parser.add_argument('--file', help='file with urls')
     parser.add_argument('--proxy', help='http and https proxy')
     parser.add_argument('--debug', action='store_true', help='debug output')
     parser.add_argument('--host', help='hostname or IP to use for back connections during SSRF detection')
@@ -1620,6 +1623,10 @@ def main():
         print('[*] Available handlers: {0}'.format(list(registered.keys())))
         sys.exit(1337)
 
+    if not args.file:
+        print('You must specify the --file parameter, bye.')
+        sys.exit(1337)
+
     if args.proxy:
         p = args.proxy
         proxy = {'http': p, 'https': p}
@@ -1633,7 +1640,7 @@ def main():
     else:
         extra_headers = {}
 
-    if not args.url:
+    if args.url:
         print('You must specify the -u parameter, bye.')
         sys.exit(1337)
 
@@ -1641,7 +1648,7 @@ def main():
         print('You must specify the --host parameter, bye.')
         sys.exit(1337)
 
-    if not preflight(args.url, proxy):
+    if preflight(args.url, proxy):
         print('Seems that you provided bad URL. Try another one, bye.')
         sys.exit(1337)
 
@@ -1656,19 +1663,49 @@ def main():
             if handler_func:
                 handlers_to_run.append(handler_func)
 
-    with concurrent.futures.ThreadPoolExecutor(args.workers) as tpe:
-        futures = []
-        for check in handlers_to_run:
-            my_host = '{0}:{1}'.format(args.host, args.port)
-            futures.append(tpe.submit(check, args.url, my_host, args.debug, proxy))
 
-        for future in concurrent.futures.as_completed(futures):
-            for finding in future.result():
-                print('[+] New Finding!!!')
-                print('\tName: {}'.format(finding.name))
-                print('\tUrl: {}'.format(finding.url))
-                print('\tDescription: {}\n\n'.format(finding.description))
+    semaphore = Semaphore(args.workers)
+    with concurrent.futures.ThreadPoolExecutor(args.workers) as tpe, open(args.file, 'r') as input:
+        while True:
+            line = input.readline()
+            if not line:
+                break
 
+            url = line.strip()
+
+            semaphore.acquire()
+
+            
+            try:
+                futures = []
+                for check in handlers_to_run:
+                    my_host = '{0}:{1}'.format(args.host, args.port)
+                    futures.append(tpe.submit(check, url, my_host, args.debug, proxy))
+                for future in concurrent.futures.as_completed(futures):
+                    for finding in future.result():
+                        print('[+] New Finding!!!')
+                        print('\tName: {}'.format(finding.name))
+                        print('\tUrl: {}'.format(finding.url))
+                        print('\tDescription: {}\n\n'.format(finding.description))
+            except:
+                semaphore.release()
+
+        tpe.shutdown(wait=True)
+
+
+#    with concurrent.futures.ThreadPoolExecutor(args.workers) as tpe:
+#        futures = []
+#        for check in handlers_to_run:
+#            my_host = '{0}:{1}'.format(args.host, args.port)
+#            futures.append(tpe.submit(check, args.url, my_host, args.debug, proxy))
+#
+#        for future in concurrent.futures.as_completed(futures):
+#            for finding in future.result():
+#                print('[+] New Finding!!!')
+#                print('\tName: {}'.format(finding.name))
+#                print('\tUrl: {}'.format(finding.url))
+#                print('\tDescription: {}\n\n'.format(finding.description))
+#
     httpd.shutdown()
 
 
